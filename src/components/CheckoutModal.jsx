@@ -1,5 +1,5 @@
 import { useState, useMemo } from 'react'
-
+import { supabase } from '../supabaseClient'
 export default function CheckoutModal({ cart, total, onClose, onSuccess }) {
   const shipping = total > 500 ? 0 : 60
   const grand = total + shipping
@@ -48,7 +48,7 @@ export default function CheckoutModal({ cart, total, onClose, onSuccess }) {
     setProductImages(prev => ({ ...prev, [slotId]: file }))
   }
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault()
     setErrorMsg('')
 
@@ -72,13 +72,84 @@ export default function CheckoutModal({ cart, total, onClose, onSuccess }) {
     }
 
     setIsSubmitting(true)
+    const timestamp = Date.now()
+    const folderPath = `order_${timestamp}`
 
-    // Simulate API call
-    setTimeout(() => {
+    try {
+      // 1. Upload Product Images
+      const uploadedProductUrls = {}
+      for (let slot of requiredImages) {
+        const file = productImages[slot.id]
+        const ext = file.name.split('.').pop()
+        const fileName = `${folderPath}/${slot.id}.${ext}`
+        
+        const { error: uploadError } = await supabase.storage
+          .from('order_images')
+          .upload(fileName, file)
+
+        if (uploadError) throw new Error(`Failed to upload image for ${slot.label}`)
+
+        const { data: { publicUrl } } = supabase.storage
+          .from('order_images')
+          .getPublicUrl(fileName)
+
+        uploadedProductUrls[slot.id] = publicUrl
+      }
+
+      // 2. Upload Payment Proof
+      const proofExt = paymentProof.name.split('.').pop()
+      const proofFileName = `${folderPath}/payment_proof.${proofExt}`
+      
+      const { error: proofError } = await supabase.storage
+        .from('order_images')
+        .upload(proofFileName, paymentProof)
+
+      if (proofError) throw new Error('Failed to upload payment proof')
+
+      const { data: { publicUrl: proofUrl } } = supabase.storage
+        .from('order_images')
+        .getPublicUrl(proofFileName)
+
+      // 3. Prepare Cart Data with Image URLs
+      const cartData = cart.map(item => {
+        // Find URLs for this specific item's quantity
+        const itemUrls = requiredImages
+          .filter(slot => slot.id.startsWith(item.cartKey))
+          .map(slot => uploadedProductUrls[slot.id])
+          
+        return {
+          ...item,
+          uploaded_images: itemUrls
+        }
+      })
+
+      // 4. Insert into Database
+      const { error: dbError } = await supabase
+        .from('orders')
+        .insert([{
+          name: formData.name,
+          mobile: formData.mobile,
+          email: formData.email,
+          address: formData.address,
+          pincode: formData.pincode,
+          utr: formData.utr,
+          total_amount: grand,
+          cart_data: cartData,
+          payment_proof_url: proofUrl,
+          status: 'Pending'
+        }])
+
+      if (dbError) throw new Error('Failed to save order details to database')
+
+      // 5. Success!
       setIsSubmitting(false)
-      // Call success callback which will clear cart, close modals, and show toast
       onSuccess()
-    }, 1500)
+
+    } catch (err) {
+      console.error('Checkout error:', err)
+      setErrorMsg(err.message || 'An error occurred while submitting your order. Please try again.')
+      setIsSubmitting(false)
+    }
   }
 
   return (
